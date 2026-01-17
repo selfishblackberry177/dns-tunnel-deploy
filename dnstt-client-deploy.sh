@@ -487,12 +487,133 @@ show_menu() {
     print_status "======================="
     echo ""
     echo "1) Create new dnstt-client instance"
-    echo "2) Remove existing dnstt-client instance(s)"
-    echo "3) Show all dnstt-client services status"
-    echo "4) View logs for a service"
+    echo "2) Create dependent service (e.g., SSH tunnel)"
+    echo "3) Remove existing dnstt-client instance(s)"
+    echo "4) Show all dnstt-client services status"
+    echo "5) View logs for a service"
     echo "0) Exit"
     echo ""
-    print_question "Please select an option (0-4): "
+    print_question "Please select an option (0-5): "
+}
+
+# Function to create a dependent service (e.g., SSH SOCKS proxy)
+create_dependent_service() {
+    local services
+    services=($(list_services))
+    
+    if [[ ${#services[@]} -eq 0 ]]; then
+        print_error "No dnstt-client services found. Create one first."
+        return 1
+    fi
+    
+    echo ""
+    print_status "Create a dependent service that binds to a dnstt-client instance"
+    print_status "When the parent dnstt-client restarts, this service will also restart."
+    echo ""
+    
+    # Show available services
+    show_services_status
+    
+    print_question "Select parent dnstt-client service number: "
+    read -r selection
+    
+    if ! [[ "$selection" =~ ^[0-9]+$ ]] || [[ $selection -lt 1 ]] || [[ $selection -gt ${#services[@]} ]]; then
+        print_error "Invalid selection"
+        return 1
+    fi
+    
+    local parent_service="${services[$((selection-1))]}"
+    print_status "Parent service: $parent_service"
+    
+    # Get service name suffix
+    echo ""
+    print_question "Enter a name for this dependent service (e.g., socks, tunnel): "
+    read -r dep_name
+    
+    if [[ -z "$dep_name" ]]; then
+        print_error "Name is required"
+        return 1
+    fi
+    
+    # Sanitize name
+    dep_name=$(echo "$dep_name" | sed 's/[^a-zA-Z0-9_-]//g')
+    local dep_service_name="${parent_service}-${dep_name}"
+    
+    # Get command to run
+    echo ""
+    print_status "Enter the command to run. Examples:"
+    echo "  SSH SOCKS proxy + reverse tunnel:"
+    echo "    ssh -N -D 1080 -R 8000:localhost:22 -o ServerAliveInterval=30 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=no -o BatchMode=yes -i /path/to/key -p 7000 user@127.0.0.1"
+    echo ""
+    print_question "Enter command: "
+    read -r dep_command
+    
+    if [[ -z "$dep_command" ]]; then
+        print_error "Command is required"
+        return 1
+    fi
+    
+    # Summary
+    echo ""
+    print_status "Configuration summary:"
+    echo "  Parent service:    $parent_service"
+    echo "  Dependent service: $dep_service_name"
+    echo "  Command:           $dep_command"
+    echo ""
+    
+    print_question "Create this dependent service? (y/n): "
+    read -r confirm
+    
+    if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+        print_warning "Creation cancelled"
+        return 1
+    fi
+    
+    # Create the dependent service file
+    local service_file="${SYSTEMD_DIR}/${dep_service_name}.service"
+    
+    cat > "$service_file" <<EOF
+[Unit]
+Description=Dependent service for $parent_service ($dep_name)
+After=${parent_service}.service
+BindsTo=${parent_service}.service
+PartOf=${parent_service}.service
+
+[Service]
+Type=simple
+User=root
+Environment=HOME=/root
+# Wait for parent service to be fully ready
+ExecStartPre=/bin/sleep 3
+ExecStart=$dep_command
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    
+    print_status "Dependent service created: $service_file"
+    
+    # Reload and start
+    systemctl daemon-reload
+    systemctl enable "$dep_service_name"
+    systemctl start "$dep_service_name"
+    
+    print_status "Dependent service $dep_service_name enabled and started"
+    
+    echo ""
+    systemctl status "$dep_service_name" --no-pager -l
+    
+    echo ""
+    print_status "Service management commands:"
+    echo "  Status:  systemctl status $dep_service_name"
+    echo "  Stop:    systemctl stop $dep_service_name"
+    echo "  Start:   systemctl start $dep_service_name"
+    echo "  Logs:    journalctl -u $dep_service_name -f"
+    echo ""
+    print_status "Note: This service will automatically restart when $parent_service restarts."
+    echo ""
 }
 
 # Function to view logs
@@ -539,12 +660,15 @@ main() {
                 fi
                 ;;
             2)
-                remove_services
+                create_dependent_service
                 ;;
             3)
-                show_services_status
+                remove_services
                 ;;
             4)
+                show_services_status
+                ;;
+            5)
                 view_logs
                 ;;
             0)
@@ -552,11 +676,11 @@ main() {
                 exit 0
                 ;;
             *)
-                print_error "Invalid choice. Please enter 0-4."
+                print_error "Invalid choice. Please enter 0-5."
                 ;;
         esac
         
-        if [[ "$choice" != "4" ]]; then
+        if [[ "$choice" != "5" ]]; then
             echo ""
             print_question "Press Enter to continue..."
             read -r
