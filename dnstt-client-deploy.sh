@@ -120,16 +120,30 @@ show_services_status() {
     return 0
 }
 
-# Function to generate unique service name from domain and port
+# Function to get next incremental service number
+get_next_service_number() {
+    local max_num=0
+    
+    # Find all dnstt-client systemd services
+    while IFS= read -r line; do
+        if [[ -n "$line" ]]; then
+            # Extract number from service name like dnstt-client-001, dnstt-client-002
+            local num
+            num=$(echo "$line" | sed -n 's/^dnstt-client-\([0-9]\+\)$/\1/p')
+            if [[ -n "$num" && "$num" =~ ^[0-9]+$ ]] && [[ $num -gt $max_num ]]; then
+                max_num=$num
+            fi
+        fi
+    done < <(systemctl list-unit-files --type=service --no-legend 2>/dev/null | grep "^${SERVICE_PREFIX}" | awk '{print $1}' | sed 's/\.service$//')
+    
+    printf "%03d" $((max_num + 1))
+}
+
+# Function to generate unique service name with incremental numbering
 generate_service_name() {
-    local domain="$1"
-    local port="$2"
-    
-    # Sanitize domain: replace dots with underscores, remove other special chars
-    local sanitized_domain
-    sanitized_domain=$(echo "$domain" | sed 's/\./_/g' | sed 's/[^a-zA-Z0-9_-]//g')
-    
-    echo "${SERVICE_PREFIX}${sanitized_domain}_${port}"
+    local service_number
+    service_number=$(get_next_service_number)
+    echo "${SERVICE_PREFIX}${service_number}"
 }
 
 # Function to get user input for new service
@@ -145,15 +159,15 @@ get_new_service_config() {
         DNS_RESOLVER="127.0.0.53:53"
     fi
     
-    # Domain name (required)
+    # Domain names (comma-separated, required)
     while true; do
-        print_question "Enter domain name (e.g., d.example.com): "
-        read -r DOMAIN_NAME
+        print_question "Enter domains, comma-separated (e.g., t.example.com,d.example.org): "
+        read -r DOMAIN_NAMES
         
-        if [[ -n "$DOMAIN_NAME" ]]; then
+        if [[ -n "$DOMAIN_NAMES" ]]; then
             break
         else
-            print_error "Domain name is required"
+            print_error "At least one domain is required"
         fi
     done
     
@@ -199,14 +213,14 @@ get_new_service_config() {
         fi
     fi
     
-    # Generate service name
-    SERVICE_NAME=$(generate_service_name "$DOMAIN_NAME" "$LISTEN_PORT")
+    # Generate service name with incremental numbering
+    SERVICE_NAME=$(generate_service_name)
     
     # Summary
     echo ""
     print_status "Configuration summary:"
     echo "  DNS Resolver:  $DNS_RESOLVER"
-    echo "  Domain:        $DOMAIN_NAME"
+    echo "  Domains:       $DOMAIN_NAMES"
     echo "  Listen Port:   $LISTEN_PORT"
     echo "  Service Name:  $SERVICE_NAME"
     if [[ -n "$EXTRA_ARGS" ]]; then
@@ -247,13 +261,13 @@ create_service() {
     
     cat > "$service_file" <<EOF
 [Unit]
-Description=dnstt DNS Tunnel Client ($DOMAIN_NAME -> 127.0.0.1:$LISTEN_PORT)
+Description=dnstt DNS Tunnel Client ($DOMAIN_NAMES -> 127.0.0.1:$LISTEN_PORT)
 After=network.target
 Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=${DNSTT_CLIENT_BIN} -udp ${DNS_RESOLVER} -pubkey-file ${pubkey_file}${extra_args_str} ${DOMAIN_NAME} 127.0.0.1:${LISTEN_PORT}
+ExecStart=${DNSTT_CLIENT_BIN} -udp ${DNS_RESOLVER} -pubkey-file ${pubkey_file}${extra_args_str} ${DOMAIN_NAMES} 127.0.0.1:${LISTEN_PORT}
 Restart=always
 RestartSec=5
 KillMode=mixed

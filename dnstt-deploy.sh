@@ -199,7 +199,7 @@ show_configuration_info() {
 
     echo ""
     echo -e "${BLUE}Configuration Details:${NC}"
-    echo -e "  Nameserver subdomain: ${YELLOW}$NS_SUBDOMAIN${NC}"
+    echo -e "  Domains: ${YELLOW}$NS_DOMAINS${NC}"
     echo -e "  MTU: ${YELLOW}$MTU_VALUE${NC}"
     echo -e "  Tunnel mode: ${YELLOW}$TUNNEL_MODE${NC}"
     echo -e "  Service user: ${YELLOW}$DNSTT_USER${NC}"
@@ -282,7 +282,7 @@ save_config() {
 # dnstt Server Configuration
 # Generated on $(date)
 
-NS_SUBDOMAIN="$NS_SUBDOMAIN"
+NS_DOMAINS="$NS_DOMAINS"
 MTU_VALUE="$MTU_VALUE"
 TUNNEL_MODE="$TUNNEL_MODE"
 PRIVATE_KEY_FILE="$PRIVATE_KEY_FILE"
@@ -327,7 +327,7 @@ print_success_box() {
 
     # Configuration Details
     echo -e "${header_color}Configuration Details:${reset}"
-    echo -e "  ${text_color}Nameserver subdomain: $NS_SUBDOMAIN${reset}"
+    echo -e "  ${text_color}Domains: $NS_DOMAINS${reset}"
     echo -e "  ${text_color}MTU: $MTU_VALUE${reset}"
     echo -e "  ${text_color}Tunnel mode: $TUNNEL_MODE${reset}"
     echo -e "  ${text_color}Service user: $DNSTT_USER${reset}"
@@ -560,35 +560,35 @@ install_dependencies() {
 # Function to get user input
 get_user_input() {
     # Load existing configuration if available
-    local existing_domain=""
+    local existing_domains=""
     local existing_mtu=""
     local existing_mode=""
 
     if load_existing_config; then
-        existing_domain="$NS_SUBDOMAIN"
+        existing_domains="$NS_DOMAINS"
         existing_mtu="$MTU_VALUE"
         existing_mode="$TUNNEL_MODE"
-        print_status "Found existing configuration for domain: $existing_domain"
+        print_status "Found existing configuration for domains: $existing_domains"
     fi
 
-    # Get nameserver subdomain
+    # Get domains (comma-separated)
     while true; do
-        if [[ -n "$existing_domain" ]]; then
-            print_question "Enter the nameserver subdomain (current: $existing_domain): "
+        if [[ -n "$existing_domains" ]]; then
+            print_question "Enter domains, comma-separated (current: $existing_domains): "
         else
-            print_question "Enter the nameserver subdomain (e.g., t.example.com): "
+            print_question "Enter domains, comma-separated (e.g., t.example.com,d.example.org): "
         fi
-        read -r NS_SUBDOMAIN
+        read -r NS_DOMAINS
 
-        # Use existing domain if user just presses enter
-        if [[ -z "$NS_SUBDOMAIN" && -n "$existing_domain" ]]; then
-            NS_SUBDOMAIN="$existing_domain"
+        # Use existing domains if user just presses enter
+        if [[ -z "$NS_DOMAINS" && -n "$existing_domains" ]]; then
+            NS_DOMAINS="$existing_domains"
         fi
 
-        if [[ -n "$NS_SUBDOMAIN" ]]; then
+        if [[ -n "$NS_DOMAINS" ]]; then
             break
         else
-            print_error "Please enter a valid subdomain"
+            print_error "Please enter at least one valid domain"
         fi
     done
 
@@ -649,7 +649,7 @@ get_user_input() {
     done
 
     print_status "Configuration:"
-    print_status "  Nameserver subdomain: $NS_SUBDOMAIN"
+    print_status "  Domains: $NS_DOMAINS"
     print_status "  MTU: $MTU_VALUE"
     print_status "  Tunnel mode: $TUNNEL_MODE"
 }
@@ -730,18 +730,37 @@ create_dnstt_user() {
     chmod 750 "$CONFIG_DIR"
 }
 
+# Function to get next incremental key number
+get_next_key_number() {
+    local max_num=0
+    local pattern="${CONFIG_DIR}/server_*.key"
+    
+    for keyfile in $pattern; do
+        if [[ -f "$keyfile" ]]; then
+            local basename
+            basename=$(basename "$keyfile" .key)
+            local num
+            num=$(echo "$basename" | sed 's/server_//')
+            if [[ "$num" =~ ^[0-9]+$ ]] && [[ $num -gt $max_num ]]; then
+                max_num=$num
+            fi
+        fi
+    done
+    
+    printf "%03d" $((max_num + 1))
+}
+
 # Function to generate keys
 generate_keys() {
-    # Generate key file names based on subdomain
-    local key_prefix
-    # shellcheck disable=SC2001
-    key_prefix=$(echo "$NS_SUBDOMAIN" | sed 's/\./_/g')
-    PRIVATE_KEY_FILE="${CONFIG_DIR}/${key_prefix}_server.key"
-    PUBLIC_KEY_FILE="${CONFIG_DIR}/${key_prefix}_server.pub"
+    # Generate key file names with incremental numbering
+    local key_number
+    key_number=$(get_next_key_number)
+    PRIVATE_KEY_FILE="${CONFIG_DIR}/server_${key_number}.key"
+    PUBLIC_KEY_FILE="${CONFIG_DIR}/server_${key_number}.pub"
 
-    # Check if keys already exist for this domain
-    if [[ -f "$PRIVATE_KEY_FILE" && -f "$PUBLIC_KEY_FILE" ]]; then
-        print_status "Found existing keys for domain: $NS_SUBDOMAIN"
+    # Check if keys already exist from config
+    if [[ -n "$PRIVATE_KEY_FILE" && -f "$PRIVATE_KEY_FILE" && -f "$PUBLIC_KEY_FILE" ]]; then
+        print_status "Found existing keys for domains: $NS_DOMAINS"
         print_status "  Private key: $PRIVATE_KEY_FILE"
         print_status "  Public key: $PUBLIC_KEY_FILE"
 
@@ -752,19 +771,60 @@ generate_keys() {
 
         print_status "Using existing keys (verified ownership and permissions)"
     else
-        print_status "Generating new keys for domain: $NS_SUBDOMAIN"
+        # Ask if user has predefined keys
+        print_question "Do you have predefined public and private keys? (y/n): "
+        read -r has_keys
 
-        # Generate keys (run as root, then change ownership)
-        dnstt-server -gen-key -privkey-file "$PRIVATE_KEY_FILE" -pubkey-file "$PUBLIC_KEY_FILE"
+        if [[ "$has_keys" =~ ^[Yy]$ ]]; then
+            # Get private key content
+            echo ""
+            print_status "Please paste the private key content (single line):"
+            print_question "Private key: "
+            read -r private_key_content
 
-        # Set proper ownership and permissions
-        chown "$DNSTT_USER":"$DNSTT_USER" "$PRIVATE_KEY_FILE" "$PUBLIC_KEY_FILE"
-        chmod 600 "$PRIVATE_KEY_FILE"
-        chmod 644 "$PUBLIC_KEY_FILE"
+            while [[ -z "$private_key_content" ]]; do
+                print_error "Private key is required"
+                print_question "Private key: "
+                read -r private_key_content
+            done
 
-        print_status "New keys generated:"
-        print_status "  Private key: $PRIVATE_KEY_FILE"
-        print_status "  Public key: $PUBLIC_KEY_FILE"
+            # Get public key content
+            print_question "Public key: "
+            read -r public_key_content
+
+            while [[ -z "$public_key_content" ]]; do
+                print_error "Public key is required"
+                print_question "Public key: "
+                read -r public_key_content
+            done
+
+            # Save keys to files
+            echo "$private_key_content" > "$PRIVATE_KEY_FILE"
+            echo "$public_key_content" > "$PUBLIC_KEY_FILE"
+
+            # Set proper ownership and permissions
+            chown "$DNSTT_USER":"$DNSTT_USER" "$PRIVATE_KEY_FILE" "$PUBLIC_KEY_FILE"
+            chmod 600 "$PRIVATE_KEY_FILE"
+            chmod 644 "$PUBLIC_KEY_FILE"
+
+            print_status "Predefined keys saved:"
+            print_status "  Private key: $PRIVATE_KEY_FILE"
+            print_status "  Public key: $PUBLIC_KEY_FILE"
+        else
+            print_status "Generating new keys for domains: $NS_DOMAINS"
+
+            # Generate keys (run as root, then change ownership)
+            dnstt-server -gen-key -privkey-file "$PRIVATE_KEY_FILE" -pubkey-file "$PUBLIC_KEY_FILE"
+
+            # Set proper ownership and permissions
+            chown "$DNSTT_USER":"$DNSTT_USER" "$PRIVATE_KEY_FILE" "$PUBLIC_KEY_FILE"
+            chmod 600 "$PRIVATE_KEY_FILE"
+            chmod 644 "$PUBLIC_KEY_FILE"
+
+            print_status "New keys generated:"
+            print_status "  Private key: $PRIVATE_KEY_FILE"
+            print_status "  Public key: $PUBLIC_KEY_FILE"
+        fi
     fi
 
     # Always display public key content
@@ -1063,7 +1123,7 @@ Wants=network.target
 Type=simple
 User=$DNSTT_USER
 Group=$DNSTT_USER
-ExecStart=${INSTALL_DIR}/dnstt-server -udp :${DNSTT_PORT} -privkey-file ${PRIVATE_KEY_FILE} -mtu ${MTU_VALUE} ${NS_SUBDOMAIN} 127.0.0.1:${target_port}
+ExecStart=${INSTALL_DIR}/dnstt-server -udp :${DNSTT_PORT} -privkey-file ${PRIVATE_KEY_FILE} -mtu ${MTU_VALUE} ${NS_DOMAINS} 127.0.0.1:${target_port}
 Restart=always
 RestartSec=5
 KillMode=mixed
