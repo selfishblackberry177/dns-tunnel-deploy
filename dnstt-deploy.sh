@@ -32,8 +32,73 @@ SCRIPT_INSTALL_PATH="/usr/local/bin/dnstt-deploy"
 # Global variable to track if update is available
 UPDATE_AVAILABLE=false
 
+# Offline mode flag - when true, no downloads or installations are performed
+OFFLINE_MODE=false
+
+# Function to parse command line arguments
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --offline)
+                OFFLINE_MODE=true
+                print_status "Running in OFFLINE mode - no downloads or installations will be performed"
+                shift
+                ;;
+            -h|--help)
+                echo "Usage: $0 [OPTIONS]"
+                echo ""
+                echo "Options:"
+                echo "  --offline    Run in offline mode (no downloads or installations)"
+                echo "  -h, --help   Show this help message"
+                exit 0
+                ;;
+            *)
+                print_warning "Unknown option: $1"
+                shift
+                ;;
+        esac
+    done
+}
+
+# Function to check if a command exists, error in offline mode if missing
+require_command() {
+    local cmd="$1"
+    local package="${2:-$1}"
+    if ! command -v "$cmd" &> /dev/null; then
+        if [ "$OFFLINE_MODE" = true ]; then
+            print_error "Required command '$cmd' not found. In offline mode, cannot install packages."
+            print_error "Please install '$package' manually and try again."
+            exit 1
+        fi
+        return 1
+    fi
+    return 0
+}
+
+# Function to check if a file exists, error in offline mode if missing
+require_file() {
+    local filepath="$1"
+    local description="${2:-file}"
+    if [ ! -f "$filepath" ]; then
+        if [ "$OFFLINE_MODE" = true ]; then
+            print_error "Required $description not found: $filepath"
+            print_error "In offline mode, cannot download files."
+            exit 1
+        fi
+        return 1
+    fi
+    return 0
+}
+
+
 # Function to install/update the script itself
 install_script() {
+    # Skip in offline mode
+    if [ "$OFFLINE_MODE" = true ]; then
+        print_status "Skipping script installation in offline mode"
+        return 0
+    fi
+
     print_status "Installing/updating dnstt-deploy script..."
 
     # Download the latest version
@@ -72,6 +137,12 @@ install_script() {
 
 # Function to handle manual update
 update_script() {
+    # Skip in offline mode
+    if [ "$OFFLINE_MODE" = true ]; then
+        print_warning "Cannot update script in offline mode"
+        return 1
+    fi
+
     print_status "Checking for script updates..."
 
     local temp_script="/tmp/dnstt-deploy-latest.sh"
@@ -238,6 +309,12 @@ show_configuration_info() {
     echo ""
 }
 check_for_updates() {
+    # Skip in offline mode
+    if [ "$OFFLINE_MODE" = true ]; then
+        print_status "Skipping update check in offline mode"
+        return 0
+    fi
+
     # Only check for updates if we're running from the installed location
     if [ "$0" = "$SCRIPT_INSTALL_PATH" ]; then
         print_status "Checking for script updates..."
@@ -440,7 +517,14 @@ detect_arch() {
 check_required_tools() {
     print_status "Checking required tools..."
 
-    local required_tools=("curl")
+    # In offline mode, just require curl (for non-network operations) and iptables
+    local required_tools=("iptables")
+    
+    # Only require curl in online mode
+    if [ "$OFFLINE_MODE" != true ]; then
+        required_tools+=("curl")
+    fi
+
     local missing_tools=()
 
     # Check which tools are missing
@@ -450,9 +534,11 @@ check_required_tools() {
         fi
     done
 
-    # Check for iptables separately since it might need special handling
-    if ! command -v "iptables" &> /dev/null; then
-        missing_tools+=("iptables")
+    if [ "$OFFLINE_MODE" = true ]; then
+        if [ ${#missing_tools[@]} -gt 0 ]; then
+            print_error "Required tools not found in offline mode: ${missing_tools[*]}"
+            exit 1
+        fi
     fi
 
     if [ ${#missing_tools[@]} -gt 0 ]; then
@@ -663,6 +749,15 @@ download_dnstt_server() {
     if [ -f "$filepath" ]; then
         print_status "dnstt-server already exists at $filepath"
         return 0
+    fi
+
+    # In offline mode, error if dnstt-server doesn't exist
+    if [ "$OFFLINE_MODE" = true ]; then
+        print_error "dnstt-server binary not found at $filepath"
+        print_error "In offline mode, cannot download binaries."
+        print_error "Please download dnstt-server manually from ${DNSTT_BASE_URL}/$filename"
+        print_error "and place it at $filepath"
+        exit 1
     fi
 
     print_status "Downloading dnstt-server..."
@@ -1021,15 +1116,27 @@ detect_ssh_port() {
 setup_dante() {
     print_status "Setting up Dante SOCKS proxy..."
 
-    # Install Dante
-    case $PKG_MANAGER in
-        dnf|yum)
-            $PKG_MANAGER install -y dante-server
-            ;;
-        apt)
-            apt install -y dante-server
-            ;;
-    esac
+    # Check if danted is already installed or if we need to install it
+    if ! command -v danted &> /dev/null && ! command -v sockd &> /dev/null; then
+        if [ "$OFFLINE_MODE" = true ]; then
+            print_error "Dante SOCKS proxy (danted/sockd) not found."
+            print_error "In offline mode, cannot install packages."
+            print_error "Please install dante-server manually and try again."
+            exit 1
+        fi
+
+        # Install Dante
+        case $PKG_MANAGER in
+            dnf|yum)
+                $PKG_MANAGER install -y dante-server
+                ;;
+            apt)
+                apt install -y dante-server
+                ;;
+        esac
+    else
+        print_status "Dante is already installed"
+    fi
 
     # Get the primary network interface for external interface
     local external_interface
@@ -1234,6 +1341,9 @@ main() {
     # Display final information
     display_final_info
 }
+
+# Parse command line arguments first (before main)
+parse_args "$@"
 
 # Run main function
 main "$@"
