@@ -60,36 +60,47 @@ parse_args() {
     done
 }
 
-# Function to check if a command exists, error in offline mode if missing
-require_command() {
-    local cmd="$1"
-    local package="${2:-$1}"
-    if ! command -v "$cmd" &> /dev/null; then
-        if [ "$OFFLINE_MODE" = true ]; then
-            print_error "Required command '$cmd' not found. In offline mode, cannot install packages."
-            print_error "Please install '$package' manually and try again."
-            exit 1
-        fi
-        return 1
-    fi
-    return 0
+# Helper: Get SHA256 checksum of a file
+get_file_checksum() {
+    sha256sum "$1" | cut -d' ' -f1
 }
 
-# Function to check if a file exists, error in offline mode if missing
-require_file() {
-    local filepath="$1"
-    local description="${2:-file}"
-    if [ ! -f "$filepath" ]; then
-        if [ "$OFFLINE_MODE" = true ]; then
-            print_error "Required $description not found: $filepath"
-            print_error "In offline mode, cannot download files."
-            exit 1
+# Helper: Get primary network interface
+get_primary_interface() {
+    local interface
+    interface=$(ip route | grep default | awk '{print $5}' | head -1)
+    if [[ -z "$interface" ]]; then
+        interface=$(ip link show | grep -E "^[0-9]+: (eth|ens|enp)" | head -1 | cut -d':' -f2 | awk '{print $1}')
+        if [[ -z "$interface" ]]; then
+            interface="eth0"
         fi
-        return 1
     fi
-    return 0
+    echo "$interface"
 }
 
+# Helper: Set ownership and permissions on key files
+set_key_permissions() {
+    local privkey="$1"
+    local pubkey="$2"
+    chown "$DNSTT_USER":"$DNSTT_USER" "$privkey" "$pubkey"
+    chmod 600 "$privkey"
+    chmod 644 "$pubkey"
+}
+
+# Helper: Print SOCKS proxy information
+print_socks_info() {
+    local header_color="${1:-\033[0;34m}"  # Default to blue
+    local text_color="${2:-\033[1;33m}"    # Default to yellow
+    local reset='\033[0m'
+    echo ""
+    echo -e "${header_color}SOCKS Proxy Information:${reset}"
+    echo -e "SOCKS proxy is running on ${text_color}127.0.0.1:1080${reset}"
+    echo -e "${header_color}Dante service commands:${reset}"
+    echo -e "  Status:  ${text_color}systemctl status danted${reset}"
+    echo -e "  Stop:    ${text_color}systemctl stop danted${reset}"
+    echo -e "  Start:   ${text_color}systemctl start danted${reset}"
+    echo -e "  Logs:    ${text_color}journalctl -u danted -f${reset}"
+}
 
 # Function to install/update the script itself
 install_script() {
@@ -104,25 +115,16 @@ install_script() {
     # Download the latest version
     local temp_script="/tmp/dnstt-deploy-new.sh"
     curl -Ls "$SCRIPT_URL" -o "$temp_script"
-
-    # Make it executable
     chmod +x "$temp_script"
 
     # Check if we're updating an existing installation
     if [ -f "$SCRIPT_INSTALL_PATH" ]; then
-        # Compare checksums to see if update is needed
-        local current_checksum
-        local new_checksum
-        current_checksum=$(sha256sum "$SCRIPT_INSTALL_PATH" | cut -d' ' -f1)
-        new_checksum=$(sha256sum "$temp_script" | cut -d' ' -f1)
-
-        if [ "$current_checksum" = "$new_checksum" ]; then
+        if [ "$(get_file_checksum "$SCRIPT_INSTALL_PATH")" = "$(get_file_checksum "$temp_script")" ]; then
             print_status "Script is already up to date"
             rm "$temp_script"
             return 0
-        else
-            print_status "Updating existing script installation..."
         fi
+        print_status "Updating existing script installation..."
     else
         print_status "Installing script for the first time..."
     fi
@@ -151,12 +153,7 @@ update_script() {
         return 1
     fi
 
-    local current_checksum
-    local latest_checksum
-    current_checksum=$(sha256sum "$SCRIPT_INSTALL_PATH" | cut -d' ' -f1)
-    latest_checksum=$(sha256sum "$temp_script" | cut -d' ' -f1)
-
-    if [ "$current_checksum" = "$latest_checksum" ]; then
+    if [ "$(get_file_checksum "$SCRIPT_INSTALL_PATH")" = "$(get_file_checksum "$temp_script")" ]; then
         print_status "You are already running the latest version"
         rm "$temp_script"
         return 0
@@ -191,9 +188,10 @@ show_menu() {
     echo "3) Check service status"
     echo "4) View service logs"
     echo "5) Show configuration info"
+    echo "6) Show iptables statistics"
     echo "0) Exit"
     echo ""
-    print_question "Please select an option (0-5): "
+    print_question "Please select an option (0-6): "
 }
 
 # Function to handle menu selection
@@ -226,12 +224,15 @@ handle_menu() {
             5)
                 show_configuration_info
                 ;;
+            6)
+                show_iptables_stats
+                ;;
             0)
                 print_status "Goodbye!"
                 exit 0
                 ;;
             *)
-                print_error "Invalid choice. Please enter 0-5."
+                print_error "Invalid choice. Please enter 0-6."
                 ;;
         esac
 
@@ -296,14 +297,7 @@ show_configuration_info() {
 
     # Show SOCKS info if applicable
     if [ "$TUNNEL_MODE" = "socks" ]; then
-        echo ""
-        echo -e "${BLUE}SOCKS Proxy Information:${NC}"
-        echo -e "SOCKS proxy is running on ${YELLOW}127.0.0.1:1080${NC}"
-        echo -e "${BLUE}Dante service commands:${NC}"
-        echo -e "  Status:  ${YELLOW}systemctl status danted${NC}"
-        echo -e "  Stop:    ${YELLOW}systemctl stop danted${NC}"
-        echo -e "  Start:   ${YELLOW}systemctl start danted${NC}"
-        echo -e "  Logs:    ${YELLOW}journalctl -u danted -f${NC}"
+        print_socks_info "$BLUE" "$YELLOW"
     fi
 
     echo ""
@@ -321,12 +315,7 @@ check_for_updates() {
 
         local temp_script="/tmp/dnstt-deploy-latest.sh"
         if curl -Ls "$SCRIPT_URL" -o "$temp_script" 2>/dev/null; then
-            local current_checksum
-            local latest_checksum
-            current_checksum=$(sha256sum "$SCRIPT_INSTALL_PATH" | cut -d' ' -f1)
-            latest_checksum=$(sha256sum "$temp_script" | cut -d' ' -f1)
-
-            if [ "$current_checksum" != "$latest_checksum" ]; then
+            if [ "$(get_file_checksum "$SCRIPT_INSTALL_PATH")" != "$(get_file_checksum "$temp_script")" ]; then
                 UPDATE_AVAILABLE=true
                 print_warning "New version available! Use menu option 2 to update."
             else
@@ -432,14 +421,7 @@ print_success_box() {
 
     # SOCKS info if applicable
     if [ "$TUNNEL_MODE" = "socks" ]; then
-        echo ""
-        echo -e "${header_color}SOCKS Proxy Information:${reset}"
-        echo -e "${text_color}SOCKS proxy is running on 127.0.0.1:1080${reset}"
-        echo -e "${text_color}Dante service commands:${reset}"
-        echo -e "  ${text_color}Status:  systemctl status danted${reset}"
-        echo -e "  ${text_color}Stop:    systemctl stop danted${reset}"
-        echo -e "  ${text_color}Start:   systemctl start danted${reset}"
-        echo -e "  ${text_color}Logs:    journalctl -u danted -f${reset}"
+        print_socks_info "$header_color" "$text_color"
     fi
 
     # Bottom border
@@ -448,19 +430,7 @@ print_success_box() {
     echo ""
 }
 
-# Function to print info lines without [INFO] prefix for final display
-print_info_line() {
-    local text_color='\033[1;37m'    # Bright white
-    local reset='\033[0m'
-    echo -e "${text_color}$1${reset}"
-}
 
-# Function to print section headers in final display
-print_section_header() {
-    local header_color='\033[1;36m'  # Bright cyan
-    local reset='\033[0m'
-    echo -e "${header_color}$1${reset}"
-}
 
 # Function to detect OS and package manager
 detect_os() {
@@ -860,9 +830,7 @@ generate_keys() {
         print_status "  Public key: $PUBLIC_KEY_FILE"
 
         # Verify key ownership and permissions
-        chown "$DNSTT_USER":"$DNSTT_USER" "$PRIVATE_KEY_FILE" "$PUBLIC_KEY_FILE"
-        chmod 600 "$PRIVATE_KEY_FILE"
-        chmod 644 "$PUBLIC_KEY_FILE"
+        set_key_permissions "$PRIVATE_KEY_FILE" "$PUBLIC_KEY_FILE"
 
         print_status "Using existing keys (verified ownership and permissions)"
     else
@@ -898,9 +866,7 @@ generate_keys() {
             echo "$public_key_content" > "$PUBLIC_KEY_FILE"
 
             # Set proper ownership and permissions
-            chown "$DNSTT_USER":"$DNSTT_USER" "$PRIVATE_KEY_FILE" "$PUBLIC_KEY_FILE"
-            chmod 600 "$PRIVATE_KEY_FILE"
-            chmod 644 "$PUBLIC_KEY_FILE"
+            set_key_permissions "$PRIVATE_KEY_FILE" "$PUBLIC_KEY_FILE"
 
             print_status "Predefined keys saved:"
             print_status "  Private key: $PRIVATE_KEY_FILE"
@@ -912,9 +878,7 @@ generate_keys() {
             dnstt-server -gen-key -privkey-file "$PRIVATE_KEY_FILE" -pubkey-file "$PUBLIC_KEY_FILE"
 
             # Set proper ownership and permissions
-            chown "$DNSTT_USER":"$DNSTT_USER" "$PRIVATE_KEY_FILE" "$PUBLIC_KEY_FILE"
-            chmod 600 "$PRIVATE_KEY_FILE"
-            chmod 644 "$PUBLIC_KEY_FILE"
+            set_key_permissions "$PRIVATE_KEY_FILE" "$PUBLIC_KEY_FILE"
 
             print_status "New keys generated:"
             print_status "  Private key: $PRIVATE_KEY_FILE"
@@ -939,31 +903,32 @@ configure_iptables() {
 
     # Get the primary network interface
     local interface
-    interface=$(ip route | grep default | awk '{print $5}' | head -1)
-    if [[ -z "$interface" ]]; then
-        # Try alternative method to get interface
-        interface=$(ip link show | grep -E "^[0-9]+: (eth|ens|enp)" | head -1 | cut -d':' -f2 | awk '{print $1}')
-        if [[ -z "$interface" ]]; then
-            interface="eth0"  # fallback
-            print_warning "Could not detect network interface, using eth0 as fallback"
-        else
-            print_status "Detected network interface: $interface"
-        fi
-    else
-        print_status "Using network interface: $interface"
-    fi
+    interface=$(get_primary_interface)
+    print_status "Using network interface: $interface"
 
-    # IPv4 rules
+    # IPv4 rules - check if rule exists before adding
     print_status "Setting up IPv4 iptables rules..."
 
-    if ! iptables -I INPUT -p udp --dport "$DNSTT_PORT" -j ACCEPT; then
-        print_error "Failed to add IPv4 INPUT rule"
-        exit 1
+    # Check and add INPUT rule
+    if iptables -C INPUT -p udp --dport "$DNSTT_PORT" -j ACCEPT 2>/dev/null; then
+        print_status "IPv4 INPUT rule already exists, skipping"
+    else
+        if ! iptables -I INPUT -p udp --dport "$DNSTT_PORT" -j ACCEPT; then
+            print_error "Failed to add IPv4 INPUT rule"
+            exit 1
+        fi
+        print_status "IPv4 INPUT rule added"
     fi
 
-    if ! iptables -t nat -I PREROUTING -i "$interface" -p udp --dport 53 -j REDIRECT --to-ports "$DNSTT_PORT"; then
-        print_error "Failed to add IPv4 NAT rule"
-        exit 1
+    # Check and add NAT PREROUTING rule
+    if iptables -t nat -C PREROUTING -i "$interface" -p udp --dport 53 -j REDIRECT --to-ports "$DNSTT_PORT" 2>/dev/null; then
+        print_status "IPv4 NAT rule already exists, skipping"
+    else
+        if ! iptables -t nat -I PREROUTING -i "$interface" -p udp --dport 53 -j REDIRECT --to-ports "$DNSTT_PORT"; then
+            print_error "Failed to add IPv4 NAT rule"
+            exit 1
+        fi
+        print_status "IPv4 NAT rule added"
     fi
 
     print_status "IPv4 iptables rules configured successfully"
@@ -972,13 +937,19 @@ configure_iptables() {
     if command -v ip6tables &> /dev/null && [ -f /proc/net/if_inet6 ]; then
         print_status "Setting up IPv6 iptables rules..."
 
-        if ip6tables -I INPUT -p udp --dport "$DNSTT_PORT" -j ACCEPT 2>/dev/null; then
+        # Check and add IPv6 INPUT rule
+        if ip6tables -C INPUT -p udp --dport "$DNSTT_PORT" -j ACCEPT 2>/dev/null; then
+            print_status "IPv6 INPUT rule already exists, skipping"
+        elif ip6tables -I INPUT -p udp --dport "$DNSTT_PORT" -j ACCEPT 2>/dev/null; then
             print_status "IPv6 INPUT rule added successfully"
         else
             print_warning "Failed to add IPv6 INPUT rule (IPv6 might not be fully configured)"
         fi
 
-        if ip6tables -t nat -I PREROUTING -i "$interface" -p udp --dport 53 -j REDIRECT --to-ports "$DNSTT_PORT" 2>/dev/null; then
+        # Check and add IPv6 NAT PREROUTING rule
+        if ip6tables -t nat -C PREROUTING -i "$interface" -p udp --dport 53 -j REDIRECT --to-ports "$DNSTT_PORT" 2>/dev/null; then
+            print_status "IPv6 NAT rule already exists, skipping"
+        elif ip6tables -t nat -I PREROUTING -i "$interface" -p udp --dport 53 -j REDIRECT --to-ports "$DNSTT_PORT" 2>/dev/null; then
             print_status "IPv6 NAT rule added successfully"
         else
             print_warning "Failed to add IPv6 NAT rule (IPv6 NAT might not be supported)"
@@ -993,6 +964,37 @@ configure_iptables() {
 
     # Save iptables rules based on distribution
     save_iptables_rules
+}
+
+# Function to show iptables statistics
+show_iptables_stats() {
+    print_status "iptables Statistics for dnstt"
+    print_status "============================="
+    echo ""
+
+    local interface
+    interface=$(get_primary_interface)
+
+    echo -e "${BLUE}IPv4 INPUT Rules (port $DNSTT_PORT):${NC}"
+    iptables -L INPUT -v -n --line-numbers 2>/dev/null | grep -E "(Chain|pkts|$DNSTT_PORT)" | head -20 || echo "  No rules found"
+    echo ""
+
+    echo -e "${BLUE}IPv4 NAT PREROUTING Rules (DNS redirect):${NC}"
+    iptables -t nat -L PREROUTING -v -n --line-numbers 2>/dev/null | grep -E "(Chain|pkts|53.*$DNSTT_PORT|:$DNSTT_PORT)" | head -20 || echo "  No rules found"
+    echo ""
+
+    # IPv6 stats if available
+    if command -v ip6tables &> /dev/null && [ -f /proc/net/if_inet6 ]; then
+        echo -e "${BLUE}IPv6 INPUT Rules (port $DNSTT_PORT):${NC}"
+        ip6tables -L INPUT -v -n --line-numbers 2>/dev/null | grep -E "(Chain|pkts|$DNSTT_PORT)" | head -20 || echo "  No rules found"
+        echo ""
+
+        echo -e "${BLUE}IPv6 NAT PREROUTING Rules (DNS redirect):${NC}"
+        ip6tables -t nat -L PREROUTING -v -n --line-numbers 2>/dev/null | grep -E "(Chain|pkts|53.*$DNSTT_PORT|:$DNSTT_PORT)" | head -20 || echo "  No rules found"
+        echo ""
+    fi
+
+    echo -e "${YELLOW}Legend: pkts=packets, bytes=total bytes processed${NC}"
 }
 
 # Function to save iptables rules with better error handling
@@ -1140,10 +1142,7 @@ setup_dante() {
 
     # Get the primary network interface for external interface
     local external_interface
-    external_interface=$(ip route | grep default | awk '{print $5}' | head -1)
-    if [[ -z "$external_interface" ]]; then
-        external_interface="eth0"  # fallback
-    fi
+    external_interface=$(get_primary_interface)
 
     # Configure Dante
     cat > /etc/danted.conf << EOF
