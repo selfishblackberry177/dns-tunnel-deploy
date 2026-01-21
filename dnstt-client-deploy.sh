@@ -190,6 +190,13 @@ get_new_service_config() {
         LISTEN_PORT="7000"
     fi
     
+    # Max QNAME length
+    print_question "Enter max QNAME length (default: 101): "
+    read -r MAX_QNAME_LEN
+    if [[ -z "$MAX_QNAME_LEN" ]]; then
+        MAX_QNAME_LEN="101"
+    fi
+    
     # Extra arguments
     print_question "Enter extra arguments (optional, press Enter to skip): "
     read -r EXTRA_ARGS
@@ -222,6 +229,7 @@ get_new_service_config() {
     echo "  DNS Resolver:  $DNS_RESOLVER"
     echo "  Domains:       $DOMAIN_NAMES"
     echo "  Listen Port:   $LISTEN_PORT"
+    echo "  Max QNAME Len: $MAX_QNAME_LEN"
     echo "  Service Name:  $SERVICE_NAME"
     if [[ -n "$EXTRA_ARGS" ]]; then
         echo "  Extra Args:    $EXTRA_ARGS"
@@ -267,7 +275,7 @@ Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=${DNSTT_CLIENT_BIN} -udp ${DNS_RESOLVER} -pubkey-file ${pubkey_file}${extra_args_str} ${DOMAIN_NAMES} 127.0.0.1:${LISTEN_PORT}
+ExecStart=${DNSTT_CLIENT_BIN} -udp ${DNS_RESOLVER} -pubkey-file ${pubkey_file} -max-qname-len ${MAX_QNAME_LEN}${extra_args_str} ${DOMAIN_NAMES} 127.0.0.1:${LISTEN_PORT}
 Restart=always
 RestartSec=5
 KillMode=mixed
